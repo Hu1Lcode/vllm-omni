@@ -2173,6 +2173,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
             # Handle nested OmniRequestOutput structure where images might be in request_output
             images = getattr(result.request_output, "images", [])
             stage_durations = result.stage_durations
+            stage_durations = result.stage_durations
 
             # Convert images to base64 content
             image_contents: list[dict[str, Any]] = []
@@ -2196,6 +2197,13 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                         "stage_durations": stage_durations,
                     }
                 )
+                image_contents.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{img_base64}",
+                    },
+                    "stage_durations": stage_durations,
+                })
 
             # Build response
             if not image_contents:
