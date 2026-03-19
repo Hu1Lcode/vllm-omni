@@ -1906,9 +1906,6 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         choices: list[ChatCompletionResponseChoice] = []
         final_res = omni_outputs.request_output
 
-        # Handle profiling data
-        stage_durations = omni_outputs.stage_durations
-
         # Handle different image output formats
         images = []
 
@@ -1962,7 +1959,6 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                     "image_url": {
                         "url": f"data:image/png;base64,{img_base64}",
                     },
-                    "stage_durations": stage_durations,
                 }
             )
 
