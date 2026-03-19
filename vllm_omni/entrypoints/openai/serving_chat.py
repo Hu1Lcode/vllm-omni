@@ -2177,19 +2177,20 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
             # Convert images to base64 content
             image_contents: list[dict[str, Any]] = []
             for img in images:
-                with BytesIO() as buffer:
-                    img.save(buffer, format="PNG")
-                    img_bytes = buffer.getvalue()
-                img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-                image_contents.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{img_base64}",
-                        },
-                        "stage_durations": stage_durations,
-                    }
-                )
+                if isinstance(img, list):
+                    for sub_idx, sub_img in enumerate(img):
+                        with BytesIO() as buffer:
+                            sub_img.save(buffer, format="PNG")
+                            img_bytes = buffer.getvalue()
+                        img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+                        image_contents.append(
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{img_base64}",
+                                },
+                            }
+                        )
 
             # Build response
             if not image_contents:
