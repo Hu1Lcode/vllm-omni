@@ -2197,13 +2197,6 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                         "stage_durations": stage_durations,
                     }
                 )
-                image_contents.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{img_base64}",
-                    },
-                    "stage_durations": stage_durations,
-                })
 
             # Build response
             if not image_contents:
