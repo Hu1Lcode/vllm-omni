@@ -2007,13 +2007,6 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         return choices
 
     # ==================== Diffusion Mode Methods ====================
-
-    def is_prompt_required(self, request):
-        if request.extra_body["output"] == "layered":
-            return False
-        else:
-            return True
-
     async def _create_diffusion_chat_completion(
         self,
         request: ChatCompletionRequest,
@@ -2044,10 +2037,6 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
 
             # Extract prompt and images from messages
             prompt, reference_images = self._extract_diffusion_prompt_and_images(messages)
-
-            is_required = self.is_prompt_required(request)
-            if is_required and not prompt:
-                return self._create_error_response("No text prompt found in messages")
 
             # Extract generation parameters from extra_body (preferred)
             # Reference: text_to_image.py and text_to_video.py for supported parameters
