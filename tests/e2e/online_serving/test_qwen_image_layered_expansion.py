@@ -205,6 +205,7 @@ def test_layered_output_image_count(
 # https://github.com/vllm-project/vllm-omni/issues/1966
 # case with empty prompt
 # ---------------------------------------------------------------------------
+
 PROMPT_CASES = [
     pytest.param(
         OmniServerParams(
@@ -238,3 +239,4 @@ def test_empty_prompt(omni_server: OmniServer, openai_client: OpenAIClientHandle
     }
 
     openai_client.send_diffusion_request(request_config)
+    
