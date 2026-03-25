@@ -200,6 +200,7 @@ def test_layered_output_image_count(
         img = decode_b64_image(b64)
         assert img is not None, f"Failed to decode image at index {i}"
 
+
 # ── Issue #1966 server do not support empty prompt ─────────────────────────
 # https://github.com/vllm-project/vllm-omni/issues/1966
 # case with empty prompt
@@ -237,4 +238,3 @@ def test_empty_prompt(omni_server: OmniServer, openai_client: OpenAIClientHandle
     }
 
     openai_client.send_diffusion_request(request_config)
-    
