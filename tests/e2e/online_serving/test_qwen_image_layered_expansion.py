@@ -208,10 +208,7 @@ PROMPT_CASES = [
     pytest.param(
         OmniServerParams(
             model=MODEL,
-            server_args=[
-                "--vae-use-slicing",
-                "--vae-use-tiling"
-                ],
+            server_args=["--vae-use-slicing", "--vae-use-tiling"],
         ),
         id="prompt_001",
         marks=SINGLE_CARD_FEATURE_MARKS,
@@ -240,3 +237,4 @@ def test_empty_prompt(omni_server: OmniServer, openai_client: OpenAIClientHandle
     }
 
     openai_client.send_diffusion_request(request_config)
+    
