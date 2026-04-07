@@ -874,6 +874,10 @@ class WanTransformer3DModel(nn.Module):
         self.timestep_proj_prepare = TimestepProjPrepare()
         self.output_scale_shift_prepare = OutputScaleShiftPrepare(inner_dim)
 
+        # ROPE helper
+        self._cached_rope_emb = None
+        self._hidden_states_shape = None
+
     @property
     def dtype(self) -> torch.dtype:
         """Return the dtype of the model parameters."""
@@ -895,7 +899,12 @@ class WanTransformer3DModel(nn.Module):
         post_patch_width = width // p_w
 
         # Compute RoPE embeddings (sharded by _sp_plan via split_output=True)
-        rotary_emb = self.rope(hidden_states)
+        if hidden_states.shape == self._hidden_states_shape and self._cached_rope_emb is not None:
+            rotary_emb = self._cached_rope_emb
+        else:
+            rotary_emb = self.rope(hidden_states)
+            self._hidden_states_shape = hidden_states.shape
+            self._cached_rope_emb = rotary_emb
 
         # Patch embedding and flatten to sequence
         # (hidden_states is sharded at blocks.0 input by _sp_plan)
