@@ -50,9 +50,22 @@ def apply_rotary_emb_wan(
     Returns:
         Tensor with rotary embeddings applied
     """
-    x1, x2 = hidden_states.unflatten(-1, (-1, 2)).unbind(-1)
+    from importlib.util import find_spec
     cos = freqs_cos[..., 0::2]
     sin = freqs_sin[..., 1::2]
+
+    if find_spec("mindiesd"):
+        from vllm_omni.diffusion.layers.rope import apply_rotary_emb_mindiesd
+
+        logger.info("Using MindIE-SD fused ROPE")
+        if cos.dim() > 2:
+            cos = cos.reshape(-1, cos.shape[-1])
+            sin = sin.reshape(-1, sin.shape[-1])
+
+            rotated = apply_rotary_emb_mindiesd(x=hidden_states, cos=cos, sin=sin, interleaved=True, half_head_dim=True)
+            return rotated.to(hidden_states.dtype)
+
+    x1, x2 = hidden_states.unflatten(-1, (-1, 2)).unbind(-1)
     rotated = torch.stack(
         (
             x1 * cos - x2 * sin,
