@@ -51,6 +51,7 @@ def apply_rotary_emb_wan(
         Tensor with rotary embeddings applied
     """
     from importlib.util import find_spec
+    
     cos = freqs_cos[..., 0::2]
     sin = freqs_sin[..., 1::2]
 
