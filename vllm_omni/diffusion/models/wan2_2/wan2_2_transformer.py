@@ -36,24 +36,21 @@ logger = init_logger(__name__)
 
 def apply_rotary_emb_wan(
     hidden_states: torch.Tensor,
-    freqs_cos: torch.Tensor,
-    freqs_sin: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
 ) -> torch.Tensor:
     """
     Apply rotary embeddings to input tensors using the given frequency tensors.
 
     Args:
         hidden_states: Input tensor of shape [B, S, H, D]
-        freqs_cos: Cosine frequencies
-        freqs_sin: Sine frequencies
+        cos: Cosine frequencies
+        sin: Sine frequencies
 
     Returns:
         Tensor with rotary embeddings applied
     """
     from importlib.util import find_spec
-
-    cos = freqs_cos[..., 0::2]
-    sin = freqs_sin[..., 1::2]
 
     if find_spec("mindiesd"):
         from vllm_omni.diffusion.layers.rope import apply_rotary_emb_mindiesd
@@ -902,7 +899,8 @@ class WanTransformer3DModel(nn.Module):
         if hidden_states.shape == self._hidden_states_shape and self._cached_rope_emb is not None:
             rotary_emb = self._cached_rope_emb
         else:
-            rotary_emb = self.rope(hidden_states)
+            freqs_cos, freqs_sin = self.rope(hidden_states)
+            rotary_emb = (freqs_cos[..., 0::2].to(torch.bfloat16), freqs_sin[..., 1::2].to(torch.bfloat16))
             self._hidden_states_shape = hidden_states.shape
             self._cached_rope_emb = rotary_emb
 
