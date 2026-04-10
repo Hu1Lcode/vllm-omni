@@ -885,7 +885,7 @@ class WanTransformer3DModel(nn.Module):
             if freqs_cos.dim() > 2:
                 freqs_cos = freqs_cos.flatten(0, -2)
                 freqs_sin = freqs_sin.flatten(0, -2)
-            rotary_emb = (freqs_cos[..., 0::2].to(torch.bfloat16), freqs_sin[..., 1::2].to(torch.bfloat16))
+            rotary_emb = (freqs_cos[..., 0::2], freqs_sin[..., 1::2])
             self._hidden_states_shape = hidden_states.shape
             self._cached_rope_emb = rotary_emb
 
