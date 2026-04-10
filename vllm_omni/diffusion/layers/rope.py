@@ -8,7 +8,6 @@ from vllm_omni.diffusion.layers.custom_op import CustomOp
 
 logger = init_logger(__name__)
 
-
 def rotate_half(x, interleaved=False):
     if not interleaved:
         x1, x2 = x.chunk(2, dim=-1)
@@ -82,6 +81,8 @@ class RotaryEmbedding(CustomOp):
             from flash_attn.ops.triton.rotary import apply_rotary
 
             self.apply_rotary_emb_flash_attn = apply_rotary
+        if find_spec("mindiesd") is not None:
+            self.has_mindie = True
 
     def forward_cuda(
         self,
@@ -130,7 +131,7 @@ class RotaryEmbedding(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        if find_spec("mindiesd"):
+        if self.has_mindie:
             return apply_rotary_emb_mindiesd(x, cos, sin, self.interleaved, self.half_head_dim)
         else:
             return self.forward_native(x, cos, sin)
