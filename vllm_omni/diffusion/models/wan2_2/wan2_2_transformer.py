@@ -34,7 +34,7 @@ from vllm_omni.platforms import current_omni_platform
 
 logger = init_logger(__name__)
 
-rotary_embedding = RotaryEmbedding(is_neox_style=False, half_head_dim=False)
+rotary_embedding = RotaryEmbedding(is_neox_style=False, half_head_dim=True)
 
 
 def apply_rotary_emb_wan(
@@ -886,7 +886,7 @@ class WanTransformer3DModel(nn.Module):
             if freqs_cos.dim() > 2:
                 freqs_cos = freqs_cos.flatten(0, -2)
                 freqs_sin = freqs_sin.flatten(0, -2)
-            rotary_emb = (freqs_cos, freqs_sin)
+            rotary_emb = (freqs_cos[..., 0::2], freqs_sin[..., 1::2])
             self._hidden_states_shape = hidden_states.shape
             self._cached_rope_emb = rotary_emb
 
