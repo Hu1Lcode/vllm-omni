@@ -30,6 +30,7 @@ from vllm_omni.diffusion.distributed.sp_plan import (
 )
 from vllm_omni.diffusion.forward_context import get_forward_context
 from vllm_omni.platforms import current_omni_platform
+from vllm_omni.diffusion.layers.rope import RotaryEmbedding
 
 logger = init_logger(__name__)
 
@@ -50,27 +51,8 @@ def apply_rotary_emb_wan(
     Returns:
         Tensor with rotary embeddings applied
     """
-    from importlib.util import find_spec
-
-    if find_spec("mindiesd"):
-        from vllm_omni.diffusion.layers.rope import apply_rotary_emb_mindiesd
-
-        if cos.dim() > 2:
-            cos = cos.reshape(-1, cos.shape[-1])
-            sin = sin.reshape(-1, sin.shape[-1])
-
-            rotated = apply_rotary_emb_mindiesd(x=hidden_states, cos=cos, sin=sin, interleaved=True, half_head_dim=True)
-            return rotated.to(hidden_states.dtype)
-
-    x1, x2 = hidden_states.unflatten(-1, (-1, 2)).unbind(-1)
-    rotated = torch.stack(
-        (
-            x1 * cos - x2 * sin,
-            x1 * sin + x2 * cos,
-        ),
-        dim=-1,
-    )
-    return rotated.flatten(-2, -1).to(hidden_states.dtype)
+    rotary_embedding = RotaryEmbedding(is_neox_style=False, half_head_dim=True)
+    return rotary_embedding(hidden_states, cos, sin)
 
 
 class DistributedRMSNorm(nn.Module):

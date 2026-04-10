@@ -75,11 +75,13 @@ class RotaryEmbedding(CustomOp):
     def __init__(
         self,
         is_neox_style: bool = False,
+        half_head_dim: bool = False
     ) -> None:
         super().__init__()
         self.is_neox_style = is_neox_style
         self.interleaved = not is_neox_style
         self.apply_rotary_emb_flash_attn = None
+        self.half_head_dim = half_head_dim
         if find_spec("flash_attn") is not None:
             from flash_attn.ops.triton.rotary import apply_rotary
 
@@ -133,7 +135,10 @@ class RotaryEmbedding(CustomOp):
         sin: torch.Tensor,
     ) -> torch.Tensor:
         if find_spec("mindiesd"):
-            return apply_rotary_emb_mindiesd(x, cos, sin, self.interleaved)
+            if cos.dim() > 2:
+                cos = cos.reshape(-1, cos.shape[-1])
+                sin = sin.reshape(-1, sin.shape[-1])
+            return apply_rotary_emb_mindiesd(x, cos, sin, self.interleaved, self.half_head_dim)
         else:
             return self.forward_native(x, cos, sin)
 
