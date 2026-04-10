@@ -29,8 +29,8 @@ from vllm_omni.diffusion.distributed.sp_plan import (
     SequenceParallelOutput,
 )
 from vllm_omni.diffusion.forward_context import get_forward_context
-from vllm_omni.platforms import current_omni_platform
 from vllm_omni.diffusion.layers.rope import RotaryEmbedding
+from vllm_omni.platforms import current_omni_platform
 
 logger = init_logger(__name__)
 

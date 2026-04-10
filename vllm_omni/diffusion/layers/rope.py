@@ -72,11 +72,7 @@ class RotaryEmbedding(CustomOp):
            of 1st half and 2nd half (GPT-NeoX style).
     """
 
-    def __init__(
-        self,
-        is_neox_style: bool = False,
-        half_head_dim: bool = False
-    ) -> None:
+    def __init__(self, is_neox_style: bool = False, half_head_dim: bool = False) -> None:
         super().__init__()
         self.is_neox_style = is_neox_style
         self.interleaved = not is_neox_style
