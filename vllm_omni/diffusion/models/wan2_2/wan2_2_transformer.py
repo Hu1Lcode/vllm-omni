@@ -51,7 +51,7 @@ def apply_rotary_emb_wan(
     Returns:
         Tensor with rotary embeddings applied
     """
-    rotary_embedding = RotaryEmbedding(is_neox_style=False, half_head_dim=True)
+    rotary_embedding = RotaryEmbedding(is_neox_style=False, half_head_dim=False)
     return rotary_embedding(hidden_states, cos, sin)
 
 
@@ -885,7 +885,7 @@ class WanTransformer3DModel(nn.Module):
             if freqs_cos.dim() > 2:
                 freqs_cos = freqs_cos.flatten(0, -2)
                 freqs_sin = freqs_sin.flatten(0, -2)
-            rotary_emb = (freqs_cos[..., 0::2], freqs_sin[..., 1::2])
+            rotary_emb = (freqs_cos, freqs_sin)
             self._hidden_states_shape = hidden_states.shape
             self._cached_rope_emb = rotary_emb
 
