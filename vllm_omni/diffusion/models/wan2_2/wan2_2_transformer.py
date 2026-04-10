@@ -36,6 +36,7 @@ logger = init_logger(__name__)
 
 rotary_embedding = RotaryEmbedding(is_neox_style=False, half_head_dim=False)
 
+
 def apply_rotary_emb_wan(
     hidden_states: torch.Tensor,
     cos: torch.Tensor,

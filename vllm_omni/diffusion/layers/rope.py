@@ -8,6 +8,7 @@ from vllm_omni.diffusion.layers.custom_op import CustomOp
 
 logger = init_logger(__name__)
 
+
 def rotate_half(x, interleaved=False):
     if not interleaved:
         x1, x2 = x.chunk(2, dim=-1)
