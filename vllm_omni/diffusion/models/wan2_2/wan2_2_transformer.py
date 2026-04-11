@@ -37,7 +37,7 @@ logger = init_logger(__name__)
 rotary_embedding = RotaryEmbedding(is_neox_style=False, half_head_dim=True)
 
 
-def apply_rotary_emb_wan(
+def apply_rotary_emb_wan_bak(
     hidden_states: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
@@ -55,7 +55,33 @@ def apply_rotary_emb_wan(
     """
     return rotary_embedding(hidden_states, cos, sin)
 
+def apply_rotary_emb_wan(
+    hidden_states: torch.Tensor,
+    freqs_cos: torch.Tensor,
+    freqs_sin: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Apply rotary embeddings to input tensors using the given frequency tensors.
 
+    Args:
+        hidden_states: Input tensor of shape [B, S, H, D]
+        freqs_cos: Cosine frequencies
+        freqs_sin: Sine frequencies
+
+    Returns:
+        Tensor with rotary embeddings applied
+    """
+    x1, x2 = hidden_states.unflatten(-1, (-1, 2)).unbind(-1)
+    cos = freqs_cos[..., 0::2]
+    sin = freqs_sin[..., 1::2]
+    rotated = torch.stack(
+        (
+            x1 * cos - x2 * sin,
+            x1 * sin + x2 * cos,
+        ),
+        dim=-1,
+    )
+    return rotated.flatten(-2, -1).to(hidden_states.dtype)
 class DistributedRMSNorm(nn.Module):
     """
     RMSNorm that computes global RMS across tensor parallel ranks.
