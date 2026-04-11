@@ -56,7 +56,7 @@ def apply_rotary_emb_wan_bak(
     return rotary_embedding(hidden_states, cos, sin)
 
 
-def apply_rotary_emb_wan(
+def apply_rotary_emb_wan_origin(
     hidden_states: torch.Tensor,
     freqs_cos: torch.Tensor,
     freqs_sin: torch.Tensor,
@@ -83,6 +83,23 @@ def apply_rotary_emb_wan(
     )
     return rotated.flatten(-2, -1).to(hidden_states.dtype)
 
+def apply_rotary_emb_wan(
+    hidden_states: torch.Tensor,
+    freqs_cos: torch.Tensor,
+    freqs_sin: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Apply rotary embeddings to input tensors using the given frequency tensors.
+
+    Args:
+        hidden_states: Input tensor of shape [B, S, H, D]
+        freqs_cos: Cosine frequencies
+        freqs_sin: Sine frequencies
+
+    Returns:
+        Tensor with rotary embeddings applied
+    """
+    return rotary_embedding.forward_cuda(hidden_states, freqs_cos, freqs_sin)
 
 class DistributedRMSNorm(nn.Module):
     """
