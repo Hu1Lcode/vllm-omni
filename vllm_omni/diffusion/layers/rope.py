@@ -92,8 +92,6 @@ class RotaryEmbedding(CustomOp):
         sin: torch.Tensor,
     ) -> torch.Tensor:
         x1, x2 = x.unflatten(-1, (-1, 2)).unbind(-1)
-        cos = cos[..., 0::2]
-        sin = sin[..., 1::2]
         rotated = torch.stack(
             (
                 x1 * cos - x2 * sin,
