@@ -55,6 +55,7 @@ def apply_rotary_emb_wan_bak(
     """
     return rotary_embedding(hidden_states, cos, sin)
 
+
 def apply_rotary_emb_wan(
     hidden_states: torch.Tensor,
     freqs_cos: torch.Tensor,
@@ -81,6 +82,8 @@ def apply_rotary_emb_wan(
         dim=-1,
     )
     return rotated.flatten(-2, -1).to(hidden_states.dtype)
+
+
 class DistributedRMSNorm(nn.Module):
     """
     RMSNorm that computes global RMS across tensor parallel ranks.
