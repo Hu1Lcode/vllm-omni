@@ -91,6 +91,24 @@ class RotaryEmbedding(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
+        x1, x2 = x.unflatten(-1, (-1, 2)).unbind(-1)
+        cos = cos[..., 0::2]
+        sin = sin[..., 1::2]
+        rotated = torch.stack(
+            (
+                x1 * cos - x2 * sin,
+                x1 * sin + x2 * cos,
+            ),
+            dim=-1,
+        )
+        return rotated.flatten(-2, -1).to(x.dtype)
+
+    def forward_cuda_bak(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> torch.Tensor:
         from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
 
         if cos.dim() == 3:
