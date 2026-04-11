@@ -72,12 +72,11 @@ def apply_rotary_emb_wan(
         Tensor with rotary embeddings applied
     """
     x1, x2 = hidden_states.unflatten(-1, (-1, 2)).unbind(-1)
-    cos = freqs_cos[..., 0::2]
-    sin = freqs_sin[..., 1::2]
+
     rotated = torch.stack(
         (
-            x1 * cos - x2 * sin,
-            x1 * sin + x2 * cos,
+            x1 * freqs_cos - x2 * freqs_sin,
+            x1 * freqs_sin + x2 * freqs_cos,
         ),
         dim=-1,
     )
