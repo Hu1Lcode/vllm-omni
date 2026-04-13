@@ -37,7 +37,7 @@ logger = init_logger(__name__)
 rotary_embedding = RotaryEmbedding(is_neox_style=False, half_head_dim=True)
 
 
-def apply_rotary_emb_wan(
+def apply_rotary_emb_wan_new(
     hidden_states: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
@@ -56,7 +56,7 @@ def apply_rotary_emb_wan(
     return rotary_embedding(hidden_states, cos, sin)
 
 
-def apply_rotary_emb_wan_origin(
+def apply_rotary_emb_wan(
     hidden_states: torch.Tensor,
     freqs_cos: torch.Tensor,
     freqs_sin: torch.Tensor,
@@ -910,9 +910,9 @@ class WanTransformer3DModel(nn.Module):
             rotary_emb = self._cached_rope_emb
         else:
             freqs_cos, freqs_sin = self.rope(hidden_states)
-            if freqs_cos.dim() > 2:
-                freqs_cos = freqs_cos.flatten(0, -2)
-                freqs_sin = freqs_sin.flatten(0, -2)
+            # if freqs_cos.dim() > 2:
+            #     freqs_cos = freqs_cos.flatten(0, -2)
+            #     freqs_sin = freqs_sin.flatten(0, -2)
             rotary_emb = (freqs_cos[..., 0::2].to(torch.bfloat16), freqs_sin[..., 1::2].to(torch.bfloat16))
             self._hidden_states_shape = hidden_states.shape
             self._cached_rope_emb = rotary_emb
