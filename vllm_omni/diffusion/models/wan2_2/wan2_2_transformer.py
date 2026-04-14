@@ -53,7 +53,7 @@ def apply_rotary_emb_wan(
         Tensor with rotary embeddings applied
     """
     
-    return rotary_embedding.forward_cuda(hidden_states, freqs_cos, freqs_sin)
+    return rotary_embedding(hidden_states, freqs_cos, freqs_sin)
 
 
 class DistributedRMSNorm(nn.Module):
