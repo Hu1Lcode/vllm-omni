@@ -29,15 +29,15 @@ from vllm_omni.diffusion.distributed.sp_plan import (
     SequenceParallelOutput,
 )
 from vllm_omni.diffusion.forward_context import get_forward_context
-from vllm_omni.diffusion.layers.rope import RotaryEmbedding
+from vllm_omni.diffusion.layers.rope import RotaryEmbeddingWan
 from vllm_omni.platforms import current_omni_platform
 
 logger = init_logger(__name__)
 
-rotary_embedding = RotaryEmbedding(is_neox_style=False, half_head_dim=True)
+rotary_embedding = RotaryEmbeddingWan(is_neox_style=False, half_head_dim=True)
 
 
-def apply_rotary_emb_wan_new(
+def apply_rotary_emb_wan(
     hidden_states: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
@@ -54,34 +54,6 @@ def apply_rotary_emb_wan_new(
         Tensor with rotary embeddings applied
     """
     return rotary_embedding(hidden_states, cos, sin)
-
-
-def apply_rotary_emb_wan(
-    hidden_states: torch.Tensor,
-    freqs_cos: torch.Tensor,
-    freqs_sin: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Apply rotary embeddings to input tensors using the given frequency tensors.
-
-    Args:
-        hidden_states: Input tensor of shape [B, S, H, D]
-        freqs_cos: Cosine frequencies
-        freqs_sin: Sine frequencies
-
-    Returns:
-        Tensor with rotary embeddings applied
-    """
-    x1, x2 = hidden_states.unflatten(-1, (-1, 2)).unbind(-1)
-
-    rotated = torch.stack(
-        (
-            x1 * freqs_cos - x2 * freqs_sin,
-            x1 * freqs_sin + x2 * freqs_cos,
-        ),
-        dim=-1,
-    )
-    return rotated.flatten(-2, -1).to(hidden_states.dtype)
 
 class DistributedRMSNorm(nn.Module):
     """
@@ -910,9 +882,6 @@ class WanTransformer3DModel(nn.Module):
             rotary_emb = self._cached_rope_emb
         else:
             freqs_cos, freqs_sin = self.rope(hidden_states)
-            # if freqs_cos.dim() > 2:
-            #     freqs_cos = freqs_cos.flatten(0, -2)
-            #     freqs_sin = freqs_sin.flatten(0, -2)
             rotary_emb = (freqs_cos[..., 0::2].to(torch.bfloat16), freqs_sin[..., 1::2].to(torch.bfloat16))
             self._hidden_states_shape = hidden_states.shape
             self._cached_rope_emb = rotary_emb
