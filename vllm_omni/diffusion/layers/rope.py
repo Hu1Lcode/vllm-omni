@@ -214,7 +214,6 @@ class RotaryEmbeddingWan(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        
         x1, x2 = x.unflatten(-1, (-1, 2)).unbind(-1)
         rotated = torch.stack(
             (
@@ -224,6 +223,7 @@ class RotaryEmbeddingWan(CustomOp):
             dim=-1,
         )
         return rotated.flatten(-2, -1).to(x.dtype)
+
 
 def apply_rope_to_qk(
     rope: RotaryEmbedding,
