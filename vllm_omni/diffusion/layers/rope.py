@@ -166,6 +166,7 @@ class RotaryEmbedding(CustomOp):
             interleaved=self.interleaved,
         )
 
+
 class RotaryEmbeddingWan(CustomOp):
     """
     rotary positional embedding for Wan.
