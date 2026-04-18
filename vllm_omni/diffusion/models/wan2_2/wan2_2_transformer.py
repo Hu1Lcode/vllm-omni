@@ -35,27 +35,6 @@ from vllm_omni.platforms import current_omni_platform
 
 logger = init_logger(__name__)
 
-rotary_embedding = RotaryEmbeddingWan(is_neox_style=False, half_head_dim=True)
-
-
-def apply_rotary_emb_wan(
-    hidden_states: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Apply rotary embeddings to input tensors using the given frequency tensors.
-
-    Args:
-        hidden_states: Input tensor of shape [B, S, H, D]
-        cos: Cosine frequencies
-        sin: Sine frequencies
-
-    Returns:
-        Tensor with rotary embeddings applied
-    """
-    return rotary_embedding(hidden_states, cos, sin)
-
 
 class DistributedRMSNorm(nn.Module):
     """
@@ -420,9 +399,10 @@ class WanSelfAttention(nn.Module):
 
         # Apply rotary embeddings
         if rotary_emb is not None:
+            self.rotary_embedding = RotaryEmbeddingWan(is_neox_style=False, half_head_dim=True)
             freqs_cos, freqs_sin = rotary_emb
-            query = apply_rotary_emb_wan(query, freqs_cos, freqs_sin)
-            key = apply_rotary_emb_wan(key, freqs_cos, freqs_sin)
+            query = self.rotary_embedding(query, freqs_cos, freqs_sin)
+            key = self.rotary_embedding(key, freqs_cos, freqs_sin)
 
         # Create attention metadata if mask is provided
         attn_metadata = None
