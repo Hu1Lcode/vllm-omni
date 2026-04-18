@@ -883,7 +883,7 @@ class WanTransformer3DModel(nn.Module):
             rotary_emb = self._cached_rope_emb
         else:
             freqs_cos, freqs_sin = self.rope(hidden_states)
-            rotary_emb = (freqs_cos[..., 0::2].to(torch.bfloat16), freqs_sin[..., 1::2].to(torch.bfloat16))
+            rotary_emb = (freqs_cos[..., 0::2].to(hidden_states.dtype), freqs_sin[..., 1::2].to(hidden_states.dtype))
             self._hidden_states_shape = hidden_states.shape
             self._cached_rope_emb = rotary_emb
 

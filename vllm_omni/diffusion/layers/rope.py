@@ -77,6 +77,7 @@ class RotaryEmbedding(CustomOp):
         self.is_neox_style = is_neox_style
         self.interleaved = not is_neox_style
         self.apply_rotary_emb_flash_attn = None
+        self.has_mindie = False
         if find_spec("flash_attn") is not None:
             from flash_attn.ops.triton.rotary import apply_rotary
 
@@ -171,6 +172,7 @@ class RotaryEmbeddingWan(CustomOp):
         self.interleaved = not is_neox_style
         self.apply_rotary_emb_flash_attn = None
         self.half_head_dim = half_head_dim
+        self.has_mindie = False
         if find_spec("flash_attn") is not None:
             from flash_attn.ops.triton.rotary import apply_rotary
 
