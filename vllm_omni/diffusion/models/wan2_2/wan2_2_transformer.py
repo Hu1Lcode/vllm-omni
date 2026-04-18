@@ -846,7 +846,7 @@ class WanTransformer3DModel(nn.Module):
 
         # ROPE helper
         self._cached_rope_emb = None
-        self._hidden_states_shape = None
+        self._cached_rope_resolution = None
 
     @property
     def dtype(self) -> torch.dtype:
@@ -869,7 +869,8 @@ class WanTransformer3DModel(nn.Module):
         post_patch_width = width // p_w
 
         # Compute RoPE embeddings (sharded by _sp_plan via split_output=True)
-        if hidden_states.shape == self._hidden_states_shape and self._cached_rope_emb is not None:
+        current_rope_resolution = (post_patch_num_frames, post_patch_height, post_patch_width)
+        if self._cached_rope_resolution == current_rope_resolution and self._cached_rope_emb is not None:
             rotary_emb = self._cached_rope_emb
         else:
             freqs_cos, freqs_sin = self.rope(hidden_states)
