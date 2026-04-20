@@ -159,7 +159,7 @@ class RotaryEmbedding(CustomOp):
         )
 
 
-class RotaryEmbeddingWan(CustomOp):
+class RotaryEmbeddingWan(RotaryEmbedding):
     """
     rotary positional embedding for Wan.
     interleaved: if True, rotate pairs of even and odd dimensions (GPT-J style) instead
@@ -167,18 +167,8 @@ class RotaryEmbeddingWan(CustomOp):
     """
 
     def __init__(self, is_neox_style: bool = False, half_head_dim: bool = False) -> None:
-        super().__init__()
-        self.is_neox_style = is_neox_style
-        self.interleaved = not is_neox_style
-        self.apply_rotary_emb_flash_attn = None
+        super().__init__(is_neox_style=is_neox_style)
         self.half_head_dim = half_head_dim
-        self.has_mindie = False
-        if find_spec("flash_attn") is not None:
-            from flash_attn.ops.triton.rotary import apply_rotary
-
-            self.apply_rotary_emb_flash_attn = apply_rotary
-        if find_spec("mindiesd") is not None:
-            self.has_mindie = True
 
     def forward_cuda(
         self,
