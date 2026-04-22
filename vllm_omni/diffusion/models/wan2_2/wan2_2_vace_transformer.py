@@ -122,7 +122,7 @@ class WanVACETransformer3DModel(WanTransformer3DModel):
                     for i in range(len(vace_layers))
                 ]
             )
-        
+
         # ROPE helper
         self._cached_rope_emb = None
         self._cached_rope_resolution = None
