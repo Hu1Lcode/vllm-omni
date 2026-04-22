@@ -165,7 +165,14 @@ class WanVACETransformer3DModel(WanTransformer3DModel):
         post_patch_width = width // p_w
 
         # Compute RoPE embeddings (sharded by _sp_plan via split_output=True)
-        rotary_emb = self.rope(hidden_states)
+        current_rope_resolution = (post_patch_num_frames, post_patch_height, post_patch_width)
+        if self._cached_rope_resolution == current_rope_resolution and self._cached_rope_emb is not None:
+            rotary_emb = self._cached_rope_emb
+        else:
+            freqs_cos, freqs_sin = self.rope(hidden_states)
+            rotary_emb = (freqs_cos[..., 0::2].to(hidden_states.dtype), freqs_sin[..., 1::2].to(hidden_states.dtype))
+            self._hidden_states_shape = hidden_states.shape
+            self._cached_rope_emb = rotary_emb
 
         # Patch embedding and flatten to sequence
         hidden_states = self.patch_embedding(hidden_states)
