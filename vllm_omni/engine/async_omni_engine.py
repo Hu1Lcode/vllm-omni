@@ -487,11 +487,13 @@ class AsyncOmniEngine:
 
                                     inject_omni_kv_config(stage_cfg, omni_conn_cfg, omni_from, omni_to)
                                 _inject_kv_stage_info(stage_cfg, stage_id)
+                                use_inline = self.num_stages == 1
                                 stage_clients[stage_id] = initialize_diffusion_stage(
                                     self.model,
                                     stage_cfg,
                                     metadata,
                                     batch_size=self.diffusion_batch_size,
+                                    use_inline=use_inline,
                                 )
                                 logger.info(
                                     "[AsyncOmniEngine] Stage %s initialized (diffusion, batch_size=%d)",
@@ -798,6 +800,16 @@ class AsyncOmniEngine:
         # We temporally create a default config for diffusion stage.
         # In the future, we should merge the default config with the user-provided config.
         normalized_kwargs = dict(kwargs)
+        default_sampling_params = normalized_kwargs.get("default_sampling_params")
+        if isinstance(default_sampling_params, str):
+            try:
+                default_sampling_params = json.loads(default_sampling_params)
+            except json.JSONDecodeError:
+                logger.warning("Invalid default_sampling_params JSON, ignoring stage defaults.")
+                default_sampling_params = None
+        if not isinstance(default_sampling_params, dict):
+            default_sampling_params = None
+        stage_default_sampling_params = default_sampling_params.get("0", {}) if default_sampling_params else {}
 
         # TODO: hack, convert dtype to string to avoid non-premitive omegaconf create error.
         if "dtype" in normalized_kwargs and not isinstance(normalized_kwargs["dtype"], str):
@@ -886,6 +898,7 @@ class AsyncOmniEngine:
                         else {}
                     ),
                 },
+                "default_sampling_params": stage_default_sampling_params,
                 "final_output": True,
                 "final_output_type": "image",
             }

@@ -12,6 +12,7 @@ from typing import Any, cast
 import numpy as np
 import PIL.Image
 import torch
+import torchvision.transforms.functional as TF
 from diffusers.utils.torch_utils import randn_tensor
 from torch import nn
 from transformers import AutoTokenizer, CLIPImageProcessor, CLIPVisionModel, UMT5EncoderModel
@@ -30,6 +31,7 @@ from vllm_omni.diffusion.models.wan2_2.pipeline_wan2_2 import (
     load_transformer_config,
     retrieve_latents,
 )
+from vllm_omni.diffusion.postprocess import interpolate_video_tensor
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.inputs.data import OmniTextPrompt
@@ -72,10 +74,23 @@ def get_wan22_i2v_post_process_func(
     def post_process_func(
         video: torch.Tensor,
         output_type: str = "np",
+        sampling_params=None,
     ):
         if output_type == "latent":
             return video
-        return video_processor.postprocess_video(video, output_type=output_type)
+        custom_output = {}
+        if sampling_params is not None and getattr(sampling_params, "enable_frame_interpolation", False):
+            video, multiplier = interpolate_video_tensor(
+                video,
+                exp=sampling_params.frame_interpolation_exp,
+                scale=sampling_params.frame_interpolation_scale,
+                model_path=sampling_params.frame_interpolation_model_path,
+            )
+            custom_output["video_fps_multiplier"] = multiplier
+        return {
+            "video": video_processor.postprocess_video(video, output_type=output_type),
+            "custom_output": custom_output,
+        }
 
     return post_process_func
 
@@ -84,9 +99,6 @@ def get_wan22_i2v_pre_process_func(
     od_config: OmniDiffusionConfig,
 ):
     """Pre-process function for I2V: load and resize input image."""
-    from diffusers.video_processor import VideoProcessor
-
-    video_processor = VideoProcessor(vae_scale_factor=8)
 
     def pre_process_func(request: OmniDiffusionRequest) -> OmniDiffusionRequest:
         for i, prompt in enumerate(request.prompts):
@@ -132,10 +144,6 @@ def get_wan22_i2v_pre_process_func(
             )
             prompt["multi_modal_data"]["image"] = image  # type: ignore # key existence already checked above
 
-            # Preprocess for VAE
-            prompt["additional_information"]["preprocessed_image"] = video_processor.preprocess(
-                image, height=request.sampling_params.height, width=request.sampling_params.width
-            )
             request.prompts[i] = prompt
         return request
 
@@ -459,6 +467,7 @@ class Wan22I2VPipeline(
         video_processor = VideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)
 
         if isinstance(image, PIL.Image.Image):
+            image = TF.to_tensor(image).to(device)
             image_tensor = video_processor.preprocess(image, height=height, width=width)
         else:
             image_tensor = image
@@ -467,6 +476,7 @@ class Wan22I2VPipeline(
         # Handle last_image if provided
         if last_image is not None:
             if isinstance(last_image, PIL.Image.Image):
+                last_image = TF.to_tensor(last_image).to(device)
                 last_image_tensor = video_processor.preprocess(last_image, height=height, width=width)
             else:
                 last_image_tensor = last_image
@@ -789,12 +799,14 @@ class Wan22I2VPipeline(
             return latents, latent_condition, first_frame_mask
 
         # Wan2.1 style: create mask and concatenate with condition
-        mask_lat_size = torch.ones(batch_size, 1, num_frames, latent_height, latent_width)
+        mask_lat_size = torch.ones(
+            batch_size, 1, num_frames, latent_height, latent_width, device=latent_condition.device
+        )
 
         if last_image is None:
-            mask_lat_size[:, :, list(range(1, num_frames))] = 0
+            mask_lat_size[:, :, 1:] = 0
         else:
-            mask_lat_size[:, :, list(range(1, num_frames - 1))] = 0
+            mask_lat_size[:, :, 1 : num_frames - 1] = 0
 
         first_frame_mask = mask_lat_size[:, :, 0:1]
         first_frame_mask = torch.repeat_interleave(first_frame_mask, dim=2, repeats=self.vae_scale_factor_temporal)

@@ -81,6 +81,7 @@ from vllm.tool_parsers import ToolParserManager
 from vllm.utils import random_uuid
 from vllm.utils.system_utils import decorate_logs
 
+from vllm_omni.diffusion.data import OmniRequestError
 from vllm_omni.entrypoints.async_omni import AsyncOmni
 from vllm_omni.entrypoints.openai.errors import InvalidInputReferenceError
 from vllm_omni.entrypoints.openai.image_api_utils import (
@@ -1432,12 +1433,24 @@ async def edit_images(
             input_images_list.extend(urls)
         if not input_images_list:
             raise HTTPException(status_code=422, detail="Field 'image' or 'url' is required")
-        pil_images = await _load_input_images(input_images_list)
-        if len(pil_images) > 1 and not _supports_multimodal_image_inputs(raw_request, engine_client):
+        # Reject oversized multi-image edit requests before fetching or decoding
+        # any inputs. This keeps over-limit URL requests from burning network,
+        # CPU, and memory on work that will be rejected anyway.
+        max_input_images = _get_max_edit_input_images(raw_request, engine_client)
+        if max_input_images is not None and len(input_images_list) > max_input_images:
+            detail = (
+                "Received multiple input images. Only a single image is supported by this model."
+                if max_input_images == 1
+                else (
+                    f"Received {len(input_images_list)} input images. "
+                    f"At most {max_input_images} images are supported by this model."
+                )
+            )
             raise HTTPException(
                 status_code=HTTPStatus.BAD_REQUEST.value,
-                detail="Received multiple input images. Only a single image is supported by this model.",
+                detail=detail,
             )
+        pil_images = await _load_input_images(input_images_list)
         prompt["multi_modal_data"] = {}
         prompt["multi_modal_data"]["image"] = pil_images
 
@@ -1601,18 +1614,25 @@ def _get_engine_and_model(raw_request: Request):
     return engine_client, model_name, normalized_stage_configs
 
 
-def _supports_multimodal_image_inputs(raw_request: Request, engine_client: Any) -> bool:
+def _get_diffusion_od_config(raw_request: Request, engine_client: Any) -> Any:
     diffusion_engine = getattr(raw_request.app.state, "diffusion_engine", None) or engine_client
     get_diffusion_od_config = getattr(diffusion_engine, "get_diffusion_od_config", None)
-    od_config = (
+    return (
         get_diffusion_od_config() if callable(get_diffusion_od_config) else getattr(diffusion_engine, "od_config", None)
     )
 
+
+def _get_max_edit_input_images(raw_request: Request, engine_client: Any) -> int | None:
+    od_config = _get_diffusion_od_config(raw_request, engine_client)
     if od_config is None:
         # Preserve the existing compatibility behavior when the diffusion
         # config is not exposed on the serving surface.
-        return True
-    return bool(getattr(od_config, "supports_multimodal_inputs", False))
+        return None
+
+    if not bool(getattr(od_config, "supports_multimodal_inputs", False)):
+        return 1
+
+    return getattr(od_config, "max_multimodal_image_inputs", None)
 
 
 def _get_lora_from_json_str(lora_body):
@@ -1682,11 +1702,14 @@ async def _generate_with_async_omni(
                 pass
         sampling_params_list.append(default_stage_params)
 
-    async for output in engine_client.generate(
-        sampling_params_list=sampling_params_list,
-        **kwargs,
-    ):
-        result = output
+    try:
+        async for output in engine_client.generate(
+            sampling_params_list=sampling_params_list,
+            **kwargs,
+        ):
+            result = output
+    except OmniRequestError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
 
     if result is None:
         raise HTTPException(
@@ -1917,18 +1940,6 @@ def video_response_from_request(model_name: str, req: VideoGenerationRequest) ->
     return resp
 
 
-async def decode_and_save_video_output(output: Any, file_name: str) -> str:
-    if not output.b64_json:
-        raise RuntimeError(f"Video output for {file_name} did not include b64_json content.")
-
-    try:
-        video_bytes = base64.b64decode(output.b64_json)
-    except Exception as decode_exc:
-        raise RuntimeError(f"Failed to decode generated video payload for {file_name}") from decode_exc
-
-    return await STORAGE_MANAGER.save(video_bytes, file_name)
-
-
 def _cleanup_video(video_id: str, output_path: str | None):
     try:
         if output_path is not None:
@@ -1952,15 +1963,12 @@ async def _run_video_generation_job(
     started_at = time.perf_counter()
     output_path = None
     try:
-        response = await handler.generate_videos(request, video_id, reference_image=reference_image)
-        if not response.data:
-            raise RuntimeError("Video generation completed but returned no outputs.")
-
-        if (video_count := len(response.data)) > 1:
-            logger.warning("Video request %s generated %s outputs but we only expected one.", video_id, video_count)
+        video_bytes, stage_durations, peak_memory_mb = await handler.generate_video_bytes(
+            request, video_id, reference_image=reference_image
+        )
 
         file_name = f"{video_id}.{job.file_extension}"
-        output_path = await decode_and_save_video_output(response.data[0], file_name)
+        output_path = await STORAGE_MANAGER.save(video_bytes, file_name)
         logger.info("Video request %s persisted %s output file.", video_id, output_path)
 
         await VIDEO_STORE.update_fields(
@@ -1971,6 +1979,8 @@ async def _run_video_generation_job(
                 "file_name": file_name,
                 "completed_at": int(time.time()),
                 "inference_time_s": time.perf_counter() - started_at,
+                "stage_durations": stage_durations,
+                "peak_memory_mb": peak_memory_mb,
             },
         )
     except Exception as exc:
@@ -2023,6 +2033,10 @@ async def create_video(
     true_cfg_scale: float | None = Form(default=None),
     seed: int | None = Form(default=None),
     negative_prompt: str | None = Form(default=None),
+    enable_frame_interpolation: bool | None = Form(default=None),
+    frame_interpolation_exp: int | None = Form(default=None, ge=1),
+    frame_interpolation_scale: float | None = Form(default=None, gt=0.0),
+    frame_interpolation_model_path: str | None = Form(default=None),
     lora: str | None = Form(default=None),
     extra_params: str | None = Form(default=None),
 ) -> VideoResponse:
@@ -2092,6 +2106,10 @@ async def create_video(
         "true_cfg_scale": true_cfg_scale,
         "seed": seed,
         "negative_prompt": negative_prompt,
+        "enable_frame_interpolation": enable_frame_interpolation,
+        "frame_interpolation_exp": frame_interpolation_exp,
+        "frame_interpolation_scale": frame_interpolation_scale,
+        "frame_interpolation_model_path": frame_interpolation_model_path,
         "lora": _parse_form_json(lora, expected_type=dict),
         "extra_params": _parse_form_json(extra_params, expected_type=dict),
     }
