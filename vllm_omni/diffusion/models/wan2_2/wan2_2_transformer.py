@@ -19,6 +19,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.linear import ColumnParallelLinear, QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from vllm_omni.diffusion.attention.backends.abstract import AttentionMetadata
@@ -99,7 +100,7 @@ class DistributedRMSNorm(nn.Module):
 class ColumnParallelGELU(nn.Module):
     """Column parallel linear with GELU activation."""
 
-    def __init__(self, dim_in: int, dim_out: int, *, approximate: str = "tanh", bias: bool = True):
+    def __init__(self, dim_in: int, dim_out: int, *, approximate: str = "tanh", bias: bool = True, quant_config: "QuantizationConfig | None" = None):
         super().__init__()
         self.proj = ColumnParallelLinear(
             dim_in,
@@ -107,6 +108,7 @@ class ColumnParallelGELU(nn.Module):
             bias=bias,
             gather_output=False,
             return_bias=False,
+            quant_config=quant_config,
         )
         self.approximate = approximate
 
@@ -127,12 +129,13 @@ class WanFeedForward(nn.Module):
         inner_dim: int,
         dim_out: int | None = None,
         bias: bool = True,
+        quant_config: "QuantizationConfig | None" = None,
     ) -> None:
         super().__init__()
         dim_out = dim_out or dim
 
         # ColumnParallel: scatter to each tp_rank
-        self.net_0 = ColumnParallelGELU(dim, inner_dim, approximate="tanh", bias=bias)
+        self.net_0 = ColumnParallelGELU(dim, inner_dim, approximate="tanh", bias=bias, quant_config=quant_config)
         # Placeholder for weight loading compatibility
         self.net_1 = nn.Identity()
         # RowParallel: gather from each tp_rank
@@ -142,6 +145,7 @@ class WanFeedForward(nn.Module):
             bias=bias,
             input_is_parallel=True,
             return_bias=False,
+            quant_config=quant_config,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -356,6 +360,7 @@ class WanSelfAttention(nn.Module):
         head_dim: int,
         eps: float = 1e-5,
         dropout: float = 0.0,
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
 
@@ -370,6 +375,7 @@ class WanSelfAttention(nn.Module):
             head_size=head_dim,
             total_num_heads=num_heads,
             bias=True,
+            quant_config=quant_config,
         )
 
         self.num_heads = self.to_qkv.num_heads
@@ -390,6 +396,7 @@ class WanSelfAttention(nn.Module):
             bias=True,
             input_is_parallel=True,
             return_bias=False,
+            quant_config=quant_config,
         )
         self.dropout = nn.Dropout(dropout)
 
@@ -461,6 +468,7 @@ class WanCrossAttention(nn.Module):
         eps: float = 1e-5,
         dropout: float = 0.0,
         added_kv_proj_dim: int | None = None,
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
 
@@ -477,6 +485,7 @@ class WanCrossAttention(nn.Module):
             bias=True,
             gather_output=False,
             return_bias=False,
+            quant_config=quant_config,
         )
 
         # Separate K and V projections for cross-attention
@@ -486,6 +495,7 @@ class WanCrossAttention(nn.Module):
             bias=True,
             gather_output=False,
             return_bias=False,
+            quant_config=quant_config,
         )
 
         self.to_v = ColumnParallelLinear(
@@ -494,6 +504,7 @@ class WanCrossAttention(nn.Module):
             bias=True,
             gather_output=False,
             return_bias=False,
+            quant_config=quant_config,
         )
 
         tp_size = get_tensor_model_parallel_world_size()
@@ -541,6 +552,7 @@ class WanCrossAttention(nn.Module):
             bias=True,
             input_is_parallel=True,
             return_bias=False,
+            quant_config=quant_config,
         )
         self.dropout = nn.Dropout(dropout)
 
@@ -625,6 +637,7 @@ class WanTransformerBlock(nn.Module):
         eps: float = 1e-6,
         added_kv_proj_dim: int | None = None,
         cross_attn_norm: bool = False,
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
 
@@ -638,6 +651,7 @@ class WanTransformerBlock(nn.Module):
             num_heads=num_heads,
             head_dim=head_dim,
             eps=eps,
+            quant_config=quant_config,
         )
 
         # 2. Cross-attention
@@ -647,11 +661,12 @@ class WanTransformerBlock(nn.Module):
             head_dim=head_dim,
             eps=eps,
             added_kv_proj_dim=added_kv_proj_dim,
+            quant_config=quant_config,
         )
         self.norm2 = LayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
 
         # 3. Feed-forward
-        self.ffn = WanFeedForward(dim=dim, inner_dim=ffn_dim, dim_out=dim)
+        self.ffn = WanFeedForward(dim=dim, inner_dim=ffn_dim, dim_out=dim, quant_config=quant_config)
         self.norm3 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps)
 
         # Scale-shift table for modulation
@@ -858,14 +873,14 @@ class WanTransformer3DModel(nn.Module):
         # 3. Transformer blocks
         self.blocks = nn.ModuleList(
             [
-                WanTransformerBlock(inner_dim, ffn_dim, num_attention_heads, eps, added_kv_proj_dim, cross_attn_norm)
+                WanTransformerBlock(inner_dim, ffn_dim, num_attention_heads, eps, added_kv_proj_dim, cross_attn_norm, quant_config=quant_config)
                 for _ in range(num_layers)
             ]
         )
 
         # 4. Output norm & projection
         self.norm_out = AdaLayerNorm(inner_dim, elementwise_affine=False, eps=eps)
-        self.proj_out = nn.Linear(inner_dim, out_channels * math.prod(patch_size))
+        self.proj_out = ColumnParallelLinear(inner_dim, out_channels * math.prod(patch_size), bias=True, gather_output=True, quant_config=quant_config)
 
         # SP helper modules
         self.timestep_proj_prepare = TimestepProjPrepare()
