@@ -281,8 +281,11 @@ class LazyWeightMixin:
             # process_weights_after_loading
             target_loaded_numel = layer.weight.numel()
             if layer._loaded_numel == target_loaded_numel:
+                # self.process_weights_after_loading(layer)
+                import torch.distributed as dist
+                layer.to(torch.device(f"npu:{dist.get_rank()}"))
                 self.process_weights_after_loading(layer)
-
+                layer.to(torch.device("cpu"))
                 # Prevent the usual `process_weights_after_loading` call from doing
                 # anything
                 layer._already_called_process_weights_after_loading = True
@@ -442,16 +445,7 @@ class NPUInt8OnlineLinearMethod(LazyWeightMixin, NPUInt8LinearMethod):
 
         weight = layer.weight
 
-        # move to NPU if needed for torch_npu.npu_dynamic_quant
-        is_cpu = weight.device.type == "cpu"
-        if is_cpu:
-            weight = weight.to("npu")
-
         qweight, weight_scale = torch_npu.npu_dynamic_quant(weight)
-
-        if is_cpu:
-            qweight = qweight.to("cpu")
-            weight_scale = weight_scale.to("cpu")
 
         qweight = qweight.t().contiguous()
 
