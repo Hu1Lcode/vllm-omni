@@ -384,7 +384,6 @@ class WanSelfAttention(nn.Module):
             head_size=head_dim,
             total_num_heads=num_heads,
             bias=True,
-            quant_config=quant_config,
         )
 
         self.num_heads = self.to_qkv.num_heads
