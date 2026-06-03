@@ -109,8 +109,7 @@ def create_transformer_from_config(config: dict, quant_config: "QuantizationConf
     if "pos_embed_seq_len" in config:
         kwargs["pos_embed_seq_len"] = config["pos_embed_seq_len"]
 
-    if quant_config is not None:
-        kwargs["quant_config"] = quant_config
+    kwargs["quant_config"] = quant_config
     return WanTransformer3DModel(**kwargs)
 
 
