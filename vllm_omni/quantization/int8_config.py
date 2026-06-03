@@ -457,11 +457,15 @@ class NPUInt8OnlineLinearMethod(LazyWeightMixin, NPUInt8LinearMethod):
 
 
         # Update layer with new values.
-        delattr(layer, "weight")
+
+        if hasattr(layer, "weight"):
+            delattr(layer, "weight")
         layer.register_buffer("weight", qweight)
 
-        delattr(layer, "weight_scale")
+        if hasattr(layer, "weight_scale"):
+            delattr(layer, "weight_scale")
         layer.register_buffer("weight_scale", weight_scale)
+
 
 
         # Prevent duplicate processing (e.g., during weight reload)
