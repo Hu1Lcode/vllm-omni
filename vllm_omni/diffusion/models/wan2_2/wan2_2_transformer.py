@@ -528,6 +528,7 @@ class WanCrossAttention(nn.Module):
                 bias=True,
                 gather_output=False,
                 return_bias=False,
+                quant_config=quant_config,
             )
             self.add_v_proj = ColumnParallelLinear(
                 added_kv_proj_dim,
@@ -535,6 +536,7 @@ class WanCrossAttention(nn.Module):
                 bias=True,
                 gather_output=False,
                 return_bias=False,
+                quant_config=quant_config,
             )
             if get_tensor_model_parallel_world_size() > 1:
                 self.norm_added_k = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
