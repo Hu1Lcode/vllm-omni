@@ -34,6 +34,15 @@ from vllm_omni.diffusion.layers.norm import LayerNorm, RMSNorm
 
 logger = init_logger(__name__)
 
+class _ColumnParallelLinearWrapper(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.layer = ColumnParallelLinear(*args, **kwargs)
+
+    def forward(self, x):
+        return self.layer(x)[0]
+
+
 
 def apply_rotary_emb_wan(
     hidden_states: torch.Tensor,
@@ -882,7 +891,7 @@ class WanTransformer3DModel(nn.Module):
 
         # 4. Output norm & projection
         self.norm_out = AdaLayerNorm(inner_dim, elementwise_affine=False, eps=eps)
-        self.proj_out = ColumnParallelLinear(inner_dim, out_channels * math.prod(patch_size), bias=True, gather_output=True, quant_config=quant_config)
+        self.proj_out = _ColumnParallelLinearWrapper(inner_dim, out_channels * math.prod(patch_size), bias=True, gather_output=True, quant_config=quant_config)
 
         # SP helper modules
         self.timestep_proj_prepare = TimestepProjPrepare()
