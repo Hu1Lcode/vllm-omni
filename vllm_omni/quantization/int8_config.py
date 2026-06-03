@@ -439,8 +439,19 @@ class NPUInt8OnlineLinearMethod(LazyWeightMixin, NPUInt8LinearMethod):
             layer.register_parameter("weight", weight)
             initialize_single_dummy_weight(layer.weight)
 
+
         weight = layer.weight
+
+        # move to NPU if needed for torch_npu.npu_dynamic_quant
+        is_cpu = weight.device.type == "cpu"
+        if is_cpu:
+            weight = weight.to("npu")
+
         qweight, weight_scale = torch_npu.npu_dynamic_quant(weight)
+
+        if is_cpu:
+            qweight = qweight.to("cpu")
+            weight_scale = weight_scale.to("cpu")
 
         qweight = qweight.t().contiguous()
 
