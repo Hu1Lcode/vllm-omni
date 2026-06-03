@@ -456,8 +456,8 @@ class NPUInt8OnlineLinearMethod(LazyWeightMixin, NPUInt8LinearMethod):
         qweight = qweight.t().contiguous()
 
         # Update layer with new values.
-        replace_parameter(layer, "weight", qweight)
-        replace_parameter(layer, "weight_scale", weight_scale)
+        replace_parameter(layer, "weight", torch.nn.Parameter(qweight, requires_grad=False))
+        replace_parameter(layer, "weight_scale", torch.nn.Parameter(weight_scale, requires_grad=False))
 
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
