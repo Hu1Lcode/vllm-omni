@@ -822,6 +822,7 @@ class WanTransformer3DModel(nn.Module):
         added_kv_proj_dim: int | None = None,
         rope_max_seq_len: int = 1024,
         pos_embed_seq_len: int | None = None,
+        quant_config: "QuantizationConfig | None" = None,
     ):
         super().__init__()
 
@@ -845,6 +846,7 @@ class WanTransformer3DModel(nn.Module):
                 "added_kv_proj_dim": added_kv_proj_dim,
                 "rope_max_seq_len": rope_max_seq_len,
                 "pos_embed_seq_len": pos_embed_seq_len,
+                "quant_config": quant_config,
             },
         )()
 
