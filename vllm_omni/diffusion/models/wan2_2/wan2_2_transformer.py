@@ -2,12 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+import os
 from collections.abc import Iterable
+from dataclasses import replace as dataclass_replace
 from typing import Any
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+try:
+    import torch_npu
+
+    _HAS_TORCH_NPU = True
+except ImportError:
+    torch_npu = None  # type: ignore[assignment]
+    _HAS_TORCH_NPU = False
 from diffusers.models.attention import FeedForward
 from diffusers.models.embeddings import PixArtAlphaTextProjection, TimestepEmbedding, Timesteps
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
@@ -33,15 +43,6 @@ from vllm_omni.diffusion.layers.adalayernorm import AdaLayerNorm
 from vllm_omni.diffusion.layers.norm import LayerNorm, RMSNorm
 
 logger = init_logger(__name__)
-
-class _ColumnParallelLinearWrapper(nn.Module):
-    def __init__(self, *args, **kwargs):
-        super().__init__()
-        self.layer = ColumnParallelLinear(*args, **kwargs)
-
-    def forward(self, x):
-        return self.layer(x)[0]
-
 
 
 def apply_rotary_emb_wan(
@@ -357,6 +358,38 @@ class OutputScaleShiftPrepare(nn.Module):
         return shift, scale
 
 
+# ---------------------------------------------------------------------------
+# Module-level resources shared by ALL WanSelfAttention instances.
+# Streams & events are created exactly once when DBO is first enabled,
+# avoiding per-instance allocation overhead and stream bloat in profiling.
+# ---------------------------------------------------------------------------
+_dbo_initialized = False
+_dbo_s0 = None
+_dbo_s1 = None
+_dbo_event_chunks = None
+_dbo_event_a2a_0 = None
+_dbo_event_cube_free = None
+_dbo_event_done_0 = None
+_dbo_event_done_1 = None
+
+
+def _ensure_dbo_resources():
+    """Create the shared DBO streams & events once (idempotent)."""
+    global _dbo_initialized, _dbo_s0, _dbo_s1
+    global _dbo_event_chunks, _dbo_event_a2a_0, _dbo_event_cube_free, _dbo_event_done_0, _dbo_event_done_1
+    if _dbo_initialized:
+        return
+    logger.info("DBO: creating shared streams (called once per process).")
+    _dbo_s0 = torch_npu.npu.Stream()
+    _dbo_s1 = torch_npu.npu.Stream()
+    _dbo_event_chunks = torch_npu.npu.Event()
+    _dbo_event_a2a_0 = torch_npu.npu.Event()
+    _dbo_event_cube_free = torch_npu.npu.Event()
+    _dbo_event_done_0 = torch_npu.npu.Event()
+    _dbo_event_done_1 = torch_npu.npu.Event()
+    _dbo_initialized = True
+
+
 class WanSelfAttention(nn.Module):
     """
     Optimized self-attention module using vLLM layers.
@@ -384,6 +417,7 @@ class WanSelfAttention(nn.Module):
             head_size=head_dim,
             total_num_heads=num_heads,
             bias=True,
+            quant_config=quant_config,
         )
 
         self.num_heads = self.to_qkv.num_heads
@@ -407,6 +441,16 @@ class WanSelfAttention(nn.Module):
             quant_config=quant_config,
         )
         self.dropout = nn.Dropout(dropout)
+
+        # Dual-batch overlap: overlap post_attn All-to-All with o_proj.
+        # Controlled by env WAN_DUAL_BATCH_OVERLAP=1. Only effective with NPU + SP + TP=1.
+        self._enable_dual_batch_overlap = (
+            os.environ.get("WAN_DUAL_BATCH_OVERLAP", "0") == "1"
+            and hasattr(torch, "npu")
+            and get_tensor_model_parallel_world_size() <= 1
+        )
+        if self._enable_dual_batch_overlap:
+            _ensure_dbo_resources()
 
         # Unified attention layer
         self.attn = Attention(
@@ -450,7 +494,41 @@ class WanSelfAttention(nn.Module):
         if attn_mask is not None:
             attn_metadata = AttentionMetadata(attn_mask=attn_mask)
 
-        # Compute attention using unified attention layer
+        # --- Dual-Batch Overlap path ---
+        # Splits the attention output along the local-head dimension so that
+        # post_attention All-to-All (communication) and o_proj (computation)
+        # can be pipelined on separate NPU streams.
+        if self._enable_dual_batch_overlap:
+            strategy = self.attn._get_active_parallel_strategy()
+            if strategy.enabled:
+                with torch.no_grad():
+                    query_a2a, key_a2a, value_a2a, attn_metadata_a2a, ctx = (
+                        strategy.pre_attention(query, key, value, attn_metadata)
+                    )
+                    attn_out = self.attn._run_local_attention(
+                        query_a2a, key_a2a, value_a2a, attn_metadata_a2a
+                    )
+                    H_local = attn_out.shape[2]
+                    sp_size = strategy._sp_group.ulysses_world_size
+                    if H_local < 2:
+                        attn_out = strategy.post_attention(attn_out, ctx)
+                    else:
+                        logger.info_once(
+                            "DBO ACTIVATED: H_local=%d, sp_size=%d, split %d+%d.",
+                            H_local, sp_size, H_local // 2, H_local - H_local // 2,
+                        )
+                        hidden_states = self._chunked_post_attn_with_overlap(
+                            attn_out, ctx, strategy, query,
+                        )
+                        return hidden_states
+
+                hidden_states = attn_out.flatten(2, 3)
+                hidden_states = hidden_states.type_as(query)
+                hidden_states = self.to_out(hidden_states)
+                hidden_states = self.dropout(hidden_states)
+                return hidden_states
+
+        # --- Original path (no overlap) ---
         hidden_states = self.attn(query, key, value, attn_metadata)
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.type_as(query)
@@ -460,6 +538,111 @@ class WanSelfAttention(nn.Module):
         hidden_states = self.dropout(hidden_states)
 
         return hidden_states
+
+    def _chunked_post_attn_with_overlap(
+        self,
+        attn_out: torch.Tensor,
+        ctx,
+        strategy,
+        query: torch.Tensor,
+    ) -> torch.Tensor:
+        """Split attn_out along local-head dim; overlap A2A with o_proj.
+
+        attn_out: [B, S_global, H_local, D].
+
+        s0: A2A(chunk_0) → scatter → **to_out**
+        s1: wait(A2A_0) → A2A(chunk_1) → scatter → **wait(cube)** → **to_out**
+
+        Overlap: s0's to_out (Cube) ∥ s1's A2A+scatter (comm+vector).
+        s1's to_out waits for s0's to_out — no Cube contention.
+        """
+        H_local = attn_out.shape[2]
+        split = H_local // 2
+        sp_size = strategy._sp_group.ulysses_world_size
+
+        chunk_0 = attn_out[:, :, :split, :].contiguous()
+        chunk_1 = attn_out[:, :, split:, :].contiguous()
+        del attn_out
+
+        ctx_no_sync = dataclass_replace(ctx, use_sync=False)
+
+        # Reuse shared module-level streams & events (created once globally).
+        s0 = _dbo_s0
+        s1 = _dbo_s1
+        default_stream = torch_npu.npu.default_stream()
+
+        # Re-record events for this invocation.
+        default_stream.record_event(_dbo_event_chunks)
+
+        # ---- Stream 0: A2A(chunk_0) → scatter → to_out → done ----
+        with torch_npu.npu.stream(s0):
+            s0.wait_event(_dbo_event_chunks)
+            out_0 = strategy.post_attention(chunk_0, ctx_no_sync)
+            s0.record_event(_dbo_event_a2a_0)              # s1's A2A can start
+            full_flat_0 = self._scatter_chunk(
+                out_0, sp_size, H_local, split, is_first=True, query=query,
+            )
+            partial_0 = self.to_out(full_flat_0)            # Cube
+            s0.record_event(_dbo_event_cube_free)           # s1's to_out can start
+            s0.record_event(_dbo_event_done_0)
+
+        # ---- Stream 1: wait(A2A_0) → A2A(chunk_1) → scatter → wait(cube) → to_out ----
+        with torch_npu.npu.stream(s1):
+            s1.wait_event(_dbo_event_a2a_0)                 # s0's A2A done
+            out_1 = strategy.post_attention(chunk_1, ctx_no_sync)
+            full_flat_1 = self._scatter_chunk(
+                out_1, sp_size, H_local, H_local - split, is_first=False, query=query,
+            )
+            s1.wait_event(_dbo_event_cube_free)             # s0's to_out done, Cube free
+            partial_1 = self.to_out(full_flat_1)            # Cube
+            s1.record_event(_dbo_event_done_1)
+
+        # ---- Default stream: wait, combine ----
+        default_stream.wait_event(_dbo_event_done_0)
+        default_stream.wait_event(_dbo_event_done_1)
+
+        if ctx.use_sync:
+            from vllm_omni.platforms import current_omni_platform
+            current_omni_platform.synchronize()
+
+        # Both partial_o_proj calls added bias — subtract one copy.
+        result = partial_0 + partial_1
+        if self.to_out.bias is not None:
+            result = result - self.to_out.bias
+        return self.dropout(result)
+
+    @staticmethod
+    def _scatter_chunk(
+        out_chunk: torch.Tensor,
+        sp_size: int,
+        H_local: int,
+        H_local_chunk: int,
+        is_first: bool,
+        query: torch.Tensor,
+    ) -> torch.Tensor:
+        """Scatter a chunk's A2A output into a full [B, S, H, D] tensor
+        (zeros for the other chunk's heads) and flatten for o_proj.
+
+        Pure vector/mem ops — no Cube (MatMul), no communication.
+        """
+        B, S, H_chunk, D = out_chunk.shape
+        H = H_local * sp_size  # total global heads
+
+        # out_chunk groups heads by rank: [r0_chunk | r1_chunk | ... | r{sp_size-1}_chunk]
+        # Reshape to [B, S, sp_size, H_local_chunk, D]
+        out_r = out_chunk.reshape(B, S, sp_size, H_local_chunk, D)
+
+        # Full zero tensor with shape [B, S, sp_size, H_local, D]
+        full = torch.zeros(B, S, sp_size, H_local, D,
+                           dtype=out_chunk.dtype, device=out_chunk.device)
+
+        if is_first:
+            full[:, :, :, :H_local_chunk, :] = out_r
+        else:
+            full[:, :, :, H_local - H_local_chunk:, :] = out_r
+
+        # Reshape to [B, S, H, D] → flatten → [B, S, H*D]
+        return full.reshape(B, S, H * D).type_as(query)
 
 
 class WanCrossAttention(nn.Module):
@@ -536,6 +719,7 @@ class WanCrossAttention(nn.Module):
                 bias=True,
                 gather_output=False,
                 return_bias=False,
+                quant_config=quant_config,
             )
             self.add_v_proj = ColumnParallelLinear(
                 added_kv_proj_dim,
@@ -543,6 +727,7 @@ class WanCrossAttention(nn.Module):
                 bias=True,
                 gather_output=False,
                 return_bias=False,
+                quant_config=quant_config,
             )
             if get_tensor_model_parallel_world_size() > 1:
                 self.norm_added_k = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
@@ -563,6 +748,17 @@ class WanCrossAttention(nn.Module):
             quant_config=quant_config,
         )
         self.dropout = nn.Dropout(dropout)
+
+        # Dual-batch overlap: overlap Q projection+norm with K/V projection+norm.
+        # Q uses video hidden_states, K/V use text encoder_hidden_states — independent inputs.
+        # Controlled by env WAN_DUAL_BATCH_OVERLAP=1. Only effective with NPU + TP=1.
+        self._enable_dual_batch_overlap = (
+            os.environ.get("WAN_DUAL_BATCH_OVERLAP", "0") == "1"
+            and hasattr(torch, "npu")
+            and get_tensor_model_parallel_world_size() <= 1
+        )
+        if self._enable_dual_batch_overlap:
+            _ensure_dbo_resources()
 
         # Unified attention layer
         self.attn = Attention(
@@ -587,6 +783,15 @@ class WanCrossAttention(nn.Module):
             encoder_hidden_states_img = encoder_hidden_states[:, :image_context_length]
             encoder_hidden_states = encoder_hidden_states[:, image_context_length:]
 
+        # --- Dual-Batch Overlap path ---
+        # Overlaps Q projection+norm (video hidden_states) with K/V projection+norm
+        # (text encoder_hidden_states) on separate NPU streams.
+        if self._enable_dual_batch_overlap:
+            return self._forward_with_dbo(
+                hidden_states, encoder_hidden_states, encoder_hidden_states_img,
+            )
+
+        # --- Original path (no overlap) ---
         # Query projection
         query = self.to_q(hidden_states)
         query = self.norm_q(query)
@@ -616,6 +821,86 @@ class WanCrossAttention(nn.Module):
             hidden_states_img = hidden_states_img.type_as(query)
 
         # Main cross-attention using unified attention layer
+        hidden_states = self.attn(query, key, value)
+        hidden_states = hidden_states.flatten(2, 3)
+        hidden_states = hidden_states.type_as(query)
+
+        # Add image attention output if present
+        if hidden_states_img is not None:
+            hidden_states = hidden_states + hidden_states_img
+
+        # Output projection
+        hidden_states = self.to_out(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+
+        return hidden_states
+
+    def _forward_with_dbo(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        encoder_hidden_states_img: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Dual-Batch Overlap for cross-attention.
+
+        Staggers Cube operations across two streams to avoid resource contention
+        on the shared Cube unit, while overlapping Cube with Vector ops:
+
+        s0: wait(chunks) → to_q(cube) → record → norm_q(vector) → unflatten → record
+        s1: wait(chunks) →            wait → to_k(cube) → norm_k(vector) → to_v(cube) → unflatten → record
+
+        Overlap: s0's norm_q (Vector) || s1's to_k (Cube).
+        s1 idles during s0's to_q — no Cube contention.
+        """
+        s0 = _dbo_s0
+        s1 = _dbo_s1
+        default_stream = torch_npu.npu.default_stream()
+
+        # Record start event on default stream — inputs are ready
+        default_stream.record_event(_dbo_event_chunks)
+
+        # ---- Stream 0: Q chain (video hidden_states) ----
+        # Phase 1: to_q occupies Cube alone; s1 waits.
+        # Phase 2: norm_q uses Vector while s1's to_k uses Cube — true parallelism.
+        with torch_npu.npu.stream(s0):
+            s0.wait_event(_dbo_event_chunks)
+            query = self.to_q(hidden_states)       # Cube
+            s0.record_event(_dbo_event_a2a_0)      # signal s1: Cube is free
+            query = self.norm_q(query)              # Vector (overlaps s1's to_k)
+            query = query.unflatten(2, (self.num_heads, self.head_dim))
+            s0.record_event(_dbo_event_done_0)
+
+        # ---- Stream 1: K/V chain (text encoder_hidden_states) ----
+        # Idles during s0's to_q, then starts Cube work after s0 releases Cube.
+        with torch_npu.npu.stream(s1):
+            s1.wait_event(_dbo_event_chunks)        # inputs ready
+            s1.wait_event(_dbo_event_a2a_0)         # s0's to_q done, Cube free
+            key = self.to_k(encoder_hidden_states)  # Cube (overlaps s0's norm_q)
+            key = self.norm_k(key)                   # Vector
+            value = self.to_v(encoder_hidden_states) # Cube
+            key = key.unflatten(2, (self.num_heads, self.head_dim))
+            value = value.unflatten(2, (self.num_heads, self.head_dim))
+            s1.record_event(_dbo_event_done_1)
+
+        # ---- Default stream: wait for both, then attention + output ----
+        default_stream.wait_event(_dbo_event_done_0)
+        default_stream.wait_event(_dbo_event_done_1)
+
+        # I2V: Additional attention with image embeddings
+        hidden_states_img = None
+        if encoder_hidden_states_img is not None:
+            key_img = self.add_k_proj(encoder_hidden_states_img)
+            value_img = self.add_v_proj(encoder_hidden_states_img)
+            key_img = self.norm_added_k(key_img)
+
+            key_img = key_img.unflatten(2, (self.num_heads, self.head_dim))
+            value_img = value_img.unflatten(2, (self.num_heads, self.head_dim))
+
+            hidden_states_img = self.attn(query, key_img, value_img)
+            hidden_states_img = hidden_states_img.flatten(2, 3)
+            hidden_states_img = hidden_states_img.type_as(query)
+
+        # Main cross-attention
         hidden_states = self.attn(query, key, value)
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.type_as(query)
@@ -890,7 +1175,7 @@ class WanTransformer3DModel(nn.Module):
 
         # 4. Output norm & projection
         self.norm_out = AdaLayerNorm(inner_dim, elementwise_affine=False, eps=eps)
-        self.proj_out = _ColumnParallelLinearWrapper(inner_dim, out_channels * math.prod(patch_size), bias=True, gather_output=True, quant_config=quant_config)
+        self.proj_out = ColumnParallelLinear(inner_dim, out_channels * math.prod(patch_size), bias=True, gather_output=True, return_bias=False, quant_config=quant_config)
 
         # SP helper modules
         self.timestep_proj_prepare = TimestepProjPrepare()
@@ -922,7 +1207,12 @@ class WanTransformer3DModel(nn.Module):
         # Patch embedding and flatten to sequence
         # (hidden_states is sharded at blocks.0 input by _sp_plan)
         hidden_states = self.patch_embedding(hidden_states)
-        hidden_states = hidden_states.flatten(2).transpose(1, 2)
+        hidden_states = hidden_states.flatten(2).transpose(1, 2).contiguous()
+        # NOTE: .contiguous() above is critical for INT8 quantization.
+        # transpose(1,2) produces a non-contiguous tensor. Without this,
+        # every INT8 linear layer's apply_weights calls x.contiguous(),
+        # creating a full BF16 copy of the activation at each layer.
+        # A single .contiguous() here avoids ~320 redundant copies.
 
         # Handle timestep shape
         if timestep.ndim == 2:
