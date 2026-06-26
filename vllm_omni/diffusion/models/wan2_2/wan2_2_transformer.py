@@ -158,11 +158,78 @@ class WanFeedForward(nn.Module):
             quant_config=quant_config,
         )
 
+        # Dual-batch overlap: chunk input along seq dim, pipeline
+        # net_0→GELU→net_2 on two streams with staggered Cube ops.
+        self._enable_dual_batch_overlap = (
+            os.environ.get("WAN_DUAL_BATCH_OVERLAP", "0") == "1"
+            and hasattr(torch, "npu")
+            and get_tensor_model_parallel_world_size() <= 1
+        )
+        if self._enable_dual_batch_overlap:
+            _ensure_dbo_resources()
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # --- Dual-Batch Overlap path ---
+        if self._enable_dual_batch_overlap:
+            return self._forward_with_dbo(hidden_states)
+
+        # --- Original path (no overlap) ---
         hidden_states = self.net_0(hidden_states)
         hidden_states = self.net_1(hidden_states)
         hidden_states = self.net_2(hidden_states)
         return hidden_states
+
+    def _forward_with_dbo(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Dual-Batch Overlap for FFN.
+
+        Chunks input along the seq dim and pipelines the two chunks across
+        default stream + s0 with staggered Cube access.
+
+        Phases interleaved so every record_event precedes its wait_event in
+        CPU enqueue order, preventing stale-event false wake-ups.
+
+        default: net_0(C0) → GELU ─────────→ net_2(C0) → record(cube_free) → wait → concat
+        s0:               → net_0(C1) → GELU ──────────→ net_2(C1) → done
+        """
+        S = hidden_states.shape[1]
+        split = S // 2
+
+        chunk_0 = hidden_states[:, :split, :].contiguous()
+        chunk_1 = hidden_states[:, split:, :].contiguous()
+
+        s0 = _dbo_s0
+        default_stream = torch_npu.npu.default_stream()
+
+        default_stream.record_event(_dbo_event_chunks)
+
+        # === Phase 1 (default): net_0(chunk_0) → GELU ===
+        out_0 = self.net_0.proj(chunk_0)                 # Cube 1
+        default_stream.record_event(_dbo_event_a2a_0)     # signal s0: net_0(C0) done
+        out_0 = F.gelu(out_0, approximate="tanh")         # Vector (overlaps s0 net_0)
+
+        # === Phase 2 (s0): net_0(chunk_1) → GELU ===
+        with torch_npu.npu.stream(s0):
+            s0.wait_event(_dbo_event_chunks)
+            s0.wait_event(_dbo_event_a2a_0)              # default net_0(C0) done
+            out_1 = self.net_0.proj(chunk_1)             # Cube 2
+            s0.record_event(_dbo_event_barrier)           # signal default: s0 net_0 done
+            out_1 = F.gelu(out_1, approximate="tanh")     # Vector
+
+        # === Phase 3 (default): net_2(chunk_0) ===
+        default_stream.wait_event(_dbo_event_barrier)     # s0 net_0 done, Cube free
+        out_0 = self.net_2(out_0)                         # Cube 3
+        default_stream.record_event(_dbo_event_cube_free)  # signal s0: net_2(C0) done
+
+        # === Phase 4 (s0): net_2(chunk_1) ===
+        with torch_npu.npu.stream(s0):
+            s0.wait_event(_dbo_event_cube_free)           # default net_2(C0) done
+            out_1 = self.net_2(out_1)                     # Cube 4
+            s0.record_event(_dbo_event_done_0)
+
+        # ---- default stream: wait s0, concat ----
+        default_stream.wait_event(_dbo_event_done_0)
+
+        return torch.cat([out_0, out_1], dim=1)
 
 
 class WanRotaryPosEmbed(nn.Module):
@@ -359,34 +426,33 @@ class OutputScaleShiftPrepare(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Module-level resources shared by ALL WanSelfAttention instances.
-# Streams & events are created exactly once when DBO is first enabled,
+# Module-level resources shared by ALL DBO paths.
+# Stream & events are created exactly once when DBO is first enabled,
 # avoiding per-instance allocation overhead and stream bloat in profiling.
+# Uses default stream + one extra stream (s0) — two compute streams total.
 # ---------------------------------------------------------------------------
 _dbo_initialized = False
 _dbo_s0 = None
-_dbo_s1 = None
 _dbo_event_chunks = None
 _dbo_event_a2a_0 = None
 _dbo_event_cube_free = None
+_dbo_event_barrier = None
 _dbo_event_done_0 = None
-_dbo_event_done_1 = None
 
 
 def _ensure_dbo_resources():
-    """Create the shared DBO streams & events once (idempotent)."""
-    global _dbo_initialized, _dbo_s0, _dbo_s1
-    global _dbo_event_chunks, _dbo_event_a2a_0, _dbo_event_cube_free, _dbo_event_done_0, _dbo_event_done_1
+    """Create the shared DBO stream & events once (idempotent)."""
+    global _dbo_initialized, _dbo_s0
+    global _dbo_event_chunks, _dbo_event_a2a_0, _dbo_event_cube_free, _dbo_event_barrier, _dbo_event_done_0
     if _dbo_initialized:
         return
-    logger.info("DBO: creating shared streams (called once per process).")
+    logger.info("DBO: creating shared stream (called once per process).")
     _dbo_s0 = torch_npu.npu.Stream()
-    _dbo_s1 = torch_npu.npu.Stream()
     _dbo_event_chunks = torch_npu.npu.Event()
     _dbo_event_a2a_0 = torch_npu.npu.Event()
     _dbo_event_cube_free = torch_npu.npu.Event()
+    _dbo_event_barrier = torch_npu.npu.Event()
     _dbo_event_done_0 = torch_npu.npu.Event()
-    _dbo_event_done_1 = torch_npu.npu.Event()
     _dbo_initialized = True
 
 
@@ -550,11 +616,9 @@ class WanSelfAttention(nn.Module):
 
         attn_out: [B, S_global, H_local, D].
 
-        s0: A2A(chunk_0) → scatter → **to_out**
-        s1: wait(A2A_0) → A2A(chunk_1) → scatter → **wait(cube)** → **to_out**
-
-        Overlap: s0's to_out (Cube) ∥ s1's A2A+scatter (comm+vector).
-        s1's to_out waits for s0's to_out — no Cube contention.
+        default: A2A(chunk_0) comm → scatter vec → o_proj CUBE → record(cube_free)
+        s0:      wait(A2A_0) → A2A(chunk_1) comm → scatter vec → wait(cube_free) → o_proj CUBE
+                         ↑ overlap: default o_proj(Cube) ∥ s0 A2A+scatter(comm+vec)
         """
         H_local = attn_out.shape[2]
         split = H_local // 2
@@ -566,40 +630,34 @@ class WanSelfAttention(nn.Module):
 
         ctx_no_sync = dataclass_replace(ctx, use_sync=False)
 
-        # Reuse shared module-level streams & events (created once globally).
         s0 = _dbo_s0
-        s1 = _dbo_s1
         default_stream = torch_npu.npu.default_stream()
 
-        # Re-record events for this invocation.
         default_stream.record_event(_dbo_event_chunks)
 
-        # ---- Stream 0: A2A(chunk_0) → scatter → to_out → done ----
+        # ---- default stream: A2A(chunk_0) → scatter → to_out → record cube_free ----
+        out_0 = strategy.post_attention(chunk_0, ctx_no_sync)
+        default_stream.record_event(_dbo_event_a2a_0)       # s0: start A2A
+        full_flat_0 = self._scatter_chunk(
+            out_0, sp_size, H_local, split, is_first=True, query=query,
+        )
+        partial_0 = self.to_out(full_flat_0)                 # Cube
+        default_stream.record_event(_dbo_event_cube_free)     # s0: start to_out
+
+        # ---- s0: wait(A2A_0) → A2A(chunk_1) → scatter → wait(cube) → to_out ----
         with torch_npu.npu.stream(s0):
             s0.wait_event(_dbo_event_chunks)
-            out_0 = strategy.post_attention(chunk_0, ctx_no_sync)
-            s0.record_event(_dbo_event_a2a_0)              # s1's A2A can start
-            full_flat_0 = self._scatter_chunk(
-                out_0, sp_size, H_local, split, is_first=True, query=query,
-            )
-            partial_0 = self.to_out(full_flat_0)            # Cube
-            s0.record_event(_dbo_event_cube_free)           # s1's to_out can start
-            s0.record_event(_dbo_event_done_0)
-
-        # ---- Stream 1: wait(A2A_0) → A2A(chunk_1) → scatter → wait(cube) → to_out ----
-        with torch_npu.npu.stream(s1):
-            s1.wait_event(_dbo_event_a2a_0)                 # s0's A2A done
+            s0.wait_event(_dbo_event_a2a_0)                  # default A2A done
             out_1 = strategy.post_attention(chunk_1, ctx_no_sync)
             full_flat_1 = self._scatter_chunk(
                 out_1, sp_size, H_local, H_local - split, is_first=False, query=query,
             )
-            s1.wait_event(_dbo_event_cube_free)             # s0's to_out done, Cube free
-            partial_1 = self.to_out(full_flat_1)            # Cube
-            s1.record_event(_dbo_event_done_1)
+            s0.wait_event(_dbo_event_cube_free)              # default to_out done, Cube free
+            partial_1 = self.to_out(full_flat_1)             # Cube
+            s0.record_event(_dbo_event_done_0)
 
-        # ---- Default stream: wait, combine ----
+        # ---- default stream: wait s0, combine ----
         default_stream.wait_event(_dbo_event_done_0)
-        default_stream.wait_event(_dbo_event_done_1)
 
         if ctx.use_sync:
             from vllm_omni.platforms import current_omni_platform
@@ -843,48 +901,36 @@ class WanCrossAttention(nn.Module):
     ) -> torch.Tensor:
         """Dual-Batch Overlap for cross-attention.
 
-        Staggers Cube operations across two streams to avoid resource contention
-        on the shared Cube unit, while overlapping Cube with Vector ops:
+        default: to_q(video) Cube → record(a2a_0) → norm_q Vector → unflatten → ... → wait(done) → attn → to_out
+        s0:      wait(chunks+a2a_0) → to_k(text) Cube → norm_k Vector → to_v(text) Cube → unflatten → record(done)
 
-        s0: wait(chunks) → to_q(cube) → record → norm_q(vector) → unflatten → record
-        s1: wait(chunks) →            wait → to_k(cube) → norm_k(vector) → to_v(cube) → unflatten → record
-
-        Overlap: s0's norm_q (Vector) || s1's to_k (Cube).
-        s1 idles during s0's to_q — no Cube contention.
+        Overlap: default norm_q (Vector) ∥ s0 to_k (Cube).
+        s0 idles during default to_q — no Cube contention.
         """
         s0 = _dbo_s0
-        s1 = _dbo_s1
         default_stream = torch_npu.npu.default_stream()
 
-        # Record start event on default stream — inputs are ready
         default_stream.record_event(_dbo_event_chunks)
 
-        # ---- Stream 0: Q chain (video hidden_states) ----
-        # Phase 1: to_q occupies Cube alone; s1 waits.
-        # Phase 2: norm_q uses Vector while s1's to_k uses Cube — true parallelism.
-        with torch_npu.npu.stream(s0):
-            s0.wait_event(_dbo_event_chunks)
-            query = self.to_q(hidden_states)       # Cube
-            s0.record_event(_dbo_event_a2a_0)      # signal s1: Cube is free
-            query = self.norm_q(query)              # Vector (overlaps s1's to_k)
-            query = query.unflatten(2, (self.num_heads, self.head_dim))
-            s0.record_event(_dbo_event_done_0)
+        # ---- default stream: Q chain (video hidden_states) ----
+        query = self.to_q(hidden_states)               # Cube
+        default_stream.record_event(_dbo_event_a2a_0)   # signal s0: Cube free
+        query = self.norm_q(query)                      # Vector (overlaps s0's to_k)
+        query = query.unflatten(2, (self.num_heads, self.head_dim))
 
-        # ---- Stream 1: K/V chain (text encoder_hidden_states) ----
-        # Idles during s0's to_q, then starts Cube work after s0 releases Cube.
-        with torch_npu.npu.stream(s1):
-            s1.wait_event(_dbo_event_chunks)        # inputs ready
-            s1.wait_event(_dbo_event_a2a_0)         # s0's to_q done, Cube free
-            key = self.to_k(encoder_hidden_states)  # Cube (overlaps s0's norm_q)
-            key = self.norm_k(key)                   # Vector
-            value = self.to_v(encoder_hidden_states) # Cube
+        # ---- s0: K/V chain (text encoder_hidden_states) ----
+        with torch_npu.npu.stream(s0):
+            s0.wait_event(_dbo_event_chunks)             # inputs ready
+            s0.wait_event(_dbo_event_a2a_0)              # default to_q done, Cube free
+            key = self.to_k(encoder_hidden_states)       # Cube (overlaps default norm_q)
+            key = self.norm_k(key)                        # Vector
+            value = self.to_v(encoder_hidden_states)      # Cube
             key = key.unflatten(2, (self.num_heads, self.head_dim))
             value = value.unflatten(2, (self.num_heads, self.head_dim))
-            s1.record_event(_dbo_event_done_1)
+            s0.record_event(_dbo_event_done_0)
 
-        # ---- Default stream: wait for both, then attention + output ----
+        # ---- default stream: wait for K/V, then attention + output ----
         default_stream.wait_event(_dbo_event_done_0)
-        default_stream.wait_event(_dbo_event_done_1)
 
         # I2V: Additional attention with image embeddings
         hidden_states_img = None
