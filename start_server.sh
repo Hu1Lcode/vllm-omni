@@ -8,17 +8,15 @@ export MULRI_STREAM_MEMORY_REUSE=1
 
 # export WAN_DUAL_BATCH_OVERLAP=1 # dbo
 # export HCCL_OP_EXPANSION_MODE="AIV" # AIV
-export ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 vllm serve /home/wjh/ltx2.3-diffusers \
     --omni \
     --model-class-name LTX23Pipeline \
     --port 8099 \
-    --usp 8 \
-    --ulysses-mode advanced_uaa \
     --use-hsdp \
-    --hsdp-shard-size 8 \
-    --vae-patch-parallel-size 8 \
+    --hsdp-shard-size 4 \
+    --vae-patch-parallel-size 4 \
     --vae-use-tiling \
     --enforce_eager \
     --log-stats 
