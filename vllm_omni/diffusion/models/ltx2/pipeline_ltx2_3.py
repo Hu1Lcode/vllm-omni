@@ -267,7 +267,7 @@ class LTX23Pipeline(nn.Module, ProgressBarMixin):
         )
         # Move text encoder back to CPU immediately
         self.text_encoder.to("cpu")
-        torch.accelerator.empty_cache()
+        torch.cuda.empty_cache()
 
         hidden_states = text_encoder_outputs.hidden_states
 
@@ -753,8 +753,7 @@ class LTX23Pipeline(nn.Module, ProgressBarMixin):
             prompt_embeds, prompt_attention_mask, padding_side=tokenizer_padding_side
         )
         self.connectors.to("cpu")
-        if torch.cuda.is_available():
-            torch.accelerator.empty_cache()
+        torch.cuda.empty_cache()
 
         # ---- Prepare latents ----
         latent_num_frames = (num_frames - 1) // self.vae_temporal_compression_ratio + 1
@@ -978,7 +977,7 @@ class LTX23Pipeline(nn.Module, ProgressBarMixin):
             self.vocoder.to(device)
             audio = self.vocoder(generated_mel_spectrograms)
             self.vocoder.to("cpu")
-            torch.accelerator.empty_cache()
+            torch.cuda.empty_cache()
 
         return DiffusionOutput(output=(video, audio))
 

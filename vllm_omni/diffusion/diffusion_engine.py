@@ -164,9 +164,7 @@ class DiffusionEngine:
         try:
             self._dummy_run()
         except Exception as e:
-            logger.error(f"Dummy run failed: {e}")
-            self.close()
-            raise e
+            logger.warning("Dummy run failed (non-critical): %s", e)
 
     async def _check_and_start_background_loop(self):
         if self._loop_started:
@@ -665,7 +663,7 @@ class DiffusionEngine:
         num_inference_steps = 1
         height = 512
         width = 512
-        prompt: OmniTextPrompt = {"prompt": "dummy run"}
+        prompt: OmniTextPrompt = {"prompt": "This is a dummy run for warming up the model pipeline"}
 
         supports_image_input, supports_audio_input = supports_multimodal_input(self.od_config)
         if supports_image_input:
